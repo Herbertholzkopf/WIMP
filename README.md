@@ -3,9 +3,9 @@
 ## Windows IIS, MySQL & PHP Installer
 
 
-Dieses Tool führt einen durch die Installation von IIS, PHP und MySQL Datenbankserver & Workbench.
+Dieses Tool führt einen durch die Installation von IIS, PHP und MySQL Datenbankserver & Workbench – auf Wunsch auch Python.
 
-Ein grafischer Setup-Assistent für Windows Server, der IIS, PHP und – auf Wunsch – MySQL in einem Durchgang einrichtet. Gedacht für Kunden und Kollegen, die keinen Server einrichten möchten, sondern eine lauffähige PHP-Umgebung brauchen: vier Seiten, zwei Auswahlkästchen, ein Klick.
+Ein grafischer Setup-Assistent für Windows Server, der IIS, PHP und – auf Wunsch – MySQL und Python in einem Durchgang einrichtet. Gedacht für Kunden und Kollegen, die keinen Server einrichten möchten, sondern eine lauffähige PHP-Umgebung brauchen: vier Seiten, zwei Auswahlkästchen, ein Klick.
 
 Alles, was normalerweise nach Handbuch, Kommandozeile und einer Stunde Nacharbeit verlangt, passiert im Hintergrund: FastCGI-Handler, Berechtigungen für `IIS_IUSRS` und `IUSR`, OPcache, CA-Bundle für cURL, Timeouts, `maxAllowedContentLength`, MySQL-Dienst mit sicherem root-Passwort.
 
@@ -21,6 +21,7 @@ Alles, was normalerweise nach Handbuch, Kommandozeile und einer Stunde Nacharbei
 | PHP (NTS, x64) | Version frei wählbar, Liste wird live von windows.php.net geladen |
 | MySQL Server 8.4 LTS (Support bis April 2029) | optional, inklusive Dienst, `my.ini`, root-Passwort und Anwendungsdatenbank |
 | MySQL Workbench | optional |
+| Python 3 | optional; neueste Version wird automatisch von python.org ermittelt, systemweit inklusive pip und PATH-Eintrag |
 
 PHP landet unter `C:\Program Files\PHP` und wird in den maschinenweiten `PATH` eingetragen. Die `php.ini` entsteht aus `php.ini-production` und wird mit sinnvollen Werten für den IIS-Betrieb versehen.
 
@@ -29,17 +30,17 @@ PHP landet unter `C:\Program Files\PHP` und wird in den maschinenweiten `PATH` e
 Der Assistent führt durch vier Seiten:
 
 1. **Start** – Systemprüfung: Betriebssystem, Architektur, RAM, freier Platz, Internetzugang, ausstehender Neustart, bereits vorhandene Installationen. Bei einem blockierenden Fehler geht es nicht weiter.
-2. **Auswahl** – zwei Karten: Webserver + PHP (mit Versionsauswahl und Empfehlung) sowie MySQL (mit Workbench und optionaler Anwendungsdatenbank samt Benutzer und Passwort).
+2. **Auswahl** – drei Karten: Webserver + PHP (mit Versionsauswahl und Empfehlung), MySQL (mit Workbench und optionaler Anwendungsdatenbank samt Benutzer und Passwort) sowie optional Python.
 3. **Installation** – Schrittliste mit Fortschritt, Protokoll live daneben. Bei einem Fehler steht die Ursache im Klartext, alle Schritte sind wiederholbar.
 4. **Fertig** – Zusammenfassung, root-Passwort zum Kopieren, Testseite öffnen, Protokoll.
 
-Wer mehr will, findet unter **Erweiterte Optionen** die volle Kontrolle: Einzelkomponenten, PHP-Limits und -Pfade, Zeitzone, Extensions-Liste, MySQL-Pfade, Port, InnoDB-Buffer-Pool, Netzwerkfreigabe mit Firewall-Vorschau und eine Tabelle für zusätzliche Datenbankbenutzer. Unter **Werkzeuge** liegen Diagnosefunktionen wie `phpinfo.php` erzeugen, `php.ini` öffnen, IIS neu starten oder `php-cgi.exe` beenden.
+Wer mehr will, findet unter **Erweiterte Optionen** die volle Kontrolle: Einzelkomponenten, PHP-Limits und -Pfade, Zeitzone, Extensions-Liste, MySQL-Pfade, Port, InnoDB-Buffer-Pool, Netzwerkfreigabe mit Firewall-Vorschau, eine Tabelle für zusätzliche Datenbankbenutzer sowie eine feste Python-Download-URL (bestimmte Version festnageln oder interner Spiegel). Unter **Werkzeuge** liegen Diagnosefunktionen wie `phpinfo.php` erzeugen, `php.ini` öffnen, IIS neu starten oder `php-cgi.exe` beenden.
 
 ## Voraussetzungen
 
 - Windows Server 2022 oder 2025 (x64) mit grafischer Oberfläche
 - Administratorrechte – der Assistent fordert sie beim Start selbst an
-- Internetzugang, mindestens zu `windows.php.net`, `download.microsoft.com` und `cdn.mysql.com`
+- Internetzugang, mindestens zu `windows.php.net`, `download.microsoft.com` und `cdn.mysql.com` (für Python zusätzlich `www.python.org`)
 - Windows PowerShell 5.1 (bei Windows Server enthalten)
 
 Windows 11 Pro funktioniert ebenfalls und wird nur als Hinweis markiert. Für den produktiven Betrieb ist Client-Windows wegen des lizenzrechtlichen Limits von 10 gleichzeitigen Verbindungen nicht geeignet.
@@ -93,7 +94,8 @@ Ein paar Entscheidungen, die im Alltag den Unterschied machen:
 - **Passwörter nie in der Kommandozeile.** Das root-Passwort geht über eine temporäre `defaults-extra-file` an MySQL, nicht als Argument, das jeder Prozessliste mitlesen könnte. Die Zugangsdaten-Datei bekommt eine ACL, die nur Administratoren und SYSTEM zulässt.
 - **`bind-address = 127.0.0.1,::1`** bei rein lokalem Zugriff – ohne `::1` läuft jede Verbindung auf `localhost` erst in einen Timeout.
 - **OPcache versionsabhängig.** Bis PHP 8.4 liegt `php_opcache.dll` im `ext`-Ordner und braucht eine `zend_extension`-Zeile; ab PHP 8.5 ist OPcache fest eingebaut und dieselbe Zeile erzeugt bei jedem Aufruf eine Fehlermeldung. Der Assistent entscheidet anhand der Datei.
-- **Idempotent.** Jeder Schritt darf wiederholt werden. Vorhandene Installationen werden erkannt, `my.ini` und `php.ini` vor dem Überschreiben gesichert.
+- **Python mit doppelt abgesichertem PATH.** Der offizielle Installer läuft mit `InstallAllUsers=1 PrependPath=1`; anschließend kontrolliert der Assistent die PATH-Einträge (Programm- und `Scripts`-Ordner) über die Registry, zieht Fehlendes nach und prüft `python --version` und `pip --version`. Die aktuelle Version wird beim Start der Installation von der Downloadseite von python.org ermittelt. Wichtig: Bereits geöffnete Konsolenfenster kennen den neuen PATH noch nicht – einfach ein neues öffnen.
+- **Idempotent.** Jeder Schritt darf wiederholt werden. Vorhandene Installationen (auch Python, per Registry) werden erkannt, `my.ini` und `php.ini` vor dem Überschreiben gesichert.
 
 Jeder Lauf schreibt ein vollständiges Protokoll nach `C:\ProgramData\PHP-IIS-Setup\setup_JJJJMMTT_HHMMSS.log`.
 

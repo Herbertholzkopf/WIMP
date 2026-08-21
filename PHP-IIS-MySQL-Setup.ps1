@@ -1,14 +1,18 @@
 ﻿<#
 ================================================================================
- PHP + IIS + MySQL Setup-Assistent   für Windows Server 2022 / 2025
- Version 2.0 (Assistenten-Oberfläche)
+ WIMP - Windows IIS, MySQL & PHP Installer
+ (PHP + IIS + MySQL Setup-Assistent für Windows Server 2022 / 2025)
+ Version 2.1
 ================================================================================
- Richtet auf einem frischen Windows Server mit wenigen Klicks ein:
+ Führt durch die Installation von IIS, PHP und MySQL und richtet auf einem
+ frischen Windows Server mit wenigen Klicks ein:
    - IIS inkl. CGI/FastCGI, Verwaltungskonsole, URL Rewrite 2.1
    - Visual C++ Redistributable 2015-2022 (x64)
    - PHP (Non Thread Safe, x64) nach C:\Program Files\PHP, fertige php.ini,
      PATH-Eintrag, Session-/Upload-Ordner, FastCGI-Handler, Funktionstest
    - optional MySQL 8.4 LTS als Windows-Dienst (+ Workbench, + Anwendungs-DB)
+   - optional Python 3 (neueste Version von python.org, systemweit,
+     inklusive pip und PATH-Eintrag)
 
  BEDIENUNG
    Start -> Auswahl -> Installieren -> Fertig. Alle Feineinstellungen liegen
@@ -19,11 +23,12 @@
    powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\PHP-IIS-MySQL-Setup.ps1
    Das Skript hebt sich bei Bedarf selbst auf Administratorrechte an.
 
- ALS EXE WEITERGEBEN (empfohlen für Kunden) - mit dem Modul PS2EXE:
+ ALS EXE WEITERGEBEN (empfohlen für Kunden)
+   Build-Exe.ps1 ausführen - oder von Hand mit dem Modul PS2EXE:
    Install-Module ps2exe -Scope CurrentUser
    Invoke-ps2exe .\PHP-IIS-MySQL-Setup.ps1 .\PHP-IIS-MySQL-Setup.exe `
        -noConsole -requireAdmin -STA -x64 `
-       -title 'PHP + IIS Setup-Assistent' -version '2.0.0.0'
+       -title 'PHP + IIS Setup-Assistent' -version '2.1.0.0'
    -requireAdmin bettet ein UAC-Manifest ein, -STA ist für die Oberfläche
    Pflicht, -noConsole unterdrückt das schwarze Konsolenfenster.
 
@@ -111,7 +116,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle     = 'PHP + IIS Setup-Assistent'
-$script:AppVersion   = '2.0'
+$script:AppVersion   = '2.1'
 # Bildnachweis für das Programmsymbol (wird im Dialog "Info" angezeigt)
 $script:IconCreditText = 'Symbol: "Werkzeugkasten" von Magnific, nachträglich mit KI verändert.'
 $script:IconCreditUrl  = 'https://www.magnific.com/de/icon/werkzeugkasten_17119213'
@@ -239,6 +244,7 @@ function New-DefaultConfig {
         InstallWebStack = $true
         InstallMySql    = $true
         InstallWorkbench= $true
+        InstallPython   = $false      # optional, standardmäßig aus
         AppDbEnabled    = $false
         AppDbName       = ''
         AppDbUser       = ''
@@ -252,6 +258,7 @@ function New-DefaultConfig {
         InstallRewrite  = $true
         RewriteLang     = 'Deutsch'
         PhpUrl          = ''          # wird aus der Versionsliste gesetzt
+        PyUrl           = ''          # leer = neueste Version von python.org ermitteln
 
         # --- Erweitert: php.ini ---
         MaxExec         = 60
@@ -707,6 +714,8 @@ function Invoke-Preflight {
     if (Test-Path (Get-PhpExePath)) { $existing += "PHP unter $script:PhpRoot" }
     if (Test-Path $script:AppCmd)   { $existing += 'IIS' }
     if (Test-MySqlServiceExists)    { $existing += "MySQL-Dienst '$($script:Cfg.MyService)'" }
+    $pyHave = Get-PythonInstallInfo
+    if ($pyHave) { $existing += "Python $($pyHave.Version)" }
     if ($existing.Count -gt 0) {
         & $add 'Info' 'Vorhanden' ("{0} - wird erkannt und aktualisiert, nicht doppelt installiert" -f ($existing -join ', '))
     } else {
@@ -1008,27 +1017,38 @@ function Install-Php {
     Write-Log 'PHP entpackt.' 'Ok'
 }
 
-function Add-PhpToMachinePath {
-    Write-Log 'PATH-Umgebungsvariable' 'Step'
-    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
-
-    # Wichtig: unaufgelöst lesen, sonst werden %SystemRoot%-Einträge anderer
-    # Programme in feste Pfade umgeschrieben.
+<#
+ Trägt Ordner in den maschinenweiten PATH ein (falls noch nicht vorhanden),
+ zieht die aktuelle Sitzung nach und informiert laufende Programme.
+ Wichtig: der PATH wird unaufgelöst gelesen (DoNotExpandEnvironmentNames),
+ sonst würden %SystemRoot%-Einträge anderer Programme in feste Pfade
+ umgeschrieben.
+#>
+function Add-ToMachinePath {
+    param([Parameter(Mandatory)][string[]]$Dirs)
+    $key  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $item = Get-Item -LiteralPath $key
     $raw  = $item.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
 
-    $parts = @($raw -split ';' | Where-Object { $_ -ne '' })
-    if ($parts -contains $script:PhpRoot) {
-        Write-Log "$script:PhpRoot steht bereits im PATH." 'Ok'
-    } else {
-        $new = (@($parts) + $script:PhpRoot) -join ';'
-        Set-ItemProperty -LiteralPath $key -Name 'Path' -Value $new -Type ExpandString
-        Write-Log "$script:PhpRoot zum maschinenweiten PATH hinzugefügt." 'Ok'
+    $parts   = @($raw -split ';' | Where-Object { $_ -ne '' })
+    $changed = $false
+    foreach ($d in $Dirs) {
+        if ([string]::IsNullOrWhiteSpace($d)) { continue }
+        $dTrim = $d.TrimEnd('\')
+        if (@($parts | ForEach-Object { $_.TrimEnd('\') }) -contains $dTrim) {
+            Write-Log "$d steht bereits im PATH." 'Ok'
+        } else {
+            $parts  += $d
+            $changed = $true
+            Write-Log "$d zum maschinenweiten PATH hinzugefügt." 'Ok'
+        }
+        # aktuelle Sitzung sofort nachziehen
+        if ((@($env:Path -split ';') | ForEach-Object { $_.TrimEnd('\') }) -notcontains $dTrim) {
+            $env:Path = $env:Path.TrimEnd(';') + ';' + $d
+        }
     }
-
-    # aktuelle Sitzung sofort nachziehen
-    if (($env:Path -split ';') -notcontains $script:PhpRoot) {
-        $env:Path = $env:Path.TrimEnd(';') + ';' + $script:PhpRoot
+    if ($changed) {
+        Set-ItemProperty -LiteralPath $key -Name 'Path' -Value ($parts -join ';') -Type ExpandString
     }
 
     # laufende Programme über die Änderung informieren
@@ -1043,6 +1063,11 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
         [UIntPtr]$r = [UIntPtr]::Zero
         [void][Win32.EnvBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)
     } catch { }
+}
+
+function Add-PhpToMachinePath {
+    Write-Log 'PATH-Umgebungsvariable' 'Step'
+    Add-ToMachinePath -Dirs @($script:PhpRoot)
 }
 
 # ==============================================================================
@@ -2308,6 +2333,119 @@ function Invoke-MySqlConfigurePhase {
 # 14) Gesamtablauf (ein Klick auf "Installieren" arbeitet alle Schritte ab)
 # ==============================================================================
 
+# ==============================================================================
+# 14b) Python (optional)
+# ==============================================================================
+
+<#
+ Sucht eine vorhandene systemweite Python-Installation über die Registry
+ (HKLM\SOFTWARE\Python\PythonCore\<version>\InstallPath). Liefert die
+ neueste Version mit Pfad oder $null.
+#>
+function Get-PythonInstallInfo {
+    $best = $null
+    foreach ($root in @('HKLM:\SOFTWARE\Python\PythonCore', 'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore')) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+            $verText = $k.PSChildName -replace '-32$|-64$', ''
+            $ver = $null
+            if (-not [version]::TryParse($verText, [ref]$ver)) { continue }
+            $inst = (Get-ItemProperty -Path (Join-Path $k.PSPath 'InstallPath') -Name '(default)' -ErrorAction SilentlyContinue).'(default)'
+            if (-not $inst) { continue }
+            $exe = Join-Path $inst 'python.exe'
+            if (-not (Test-Path -LiteralPath $exe)) { continue }
+            if (-not $best -or $ver -gt $best.Version) {
+                $best = [pscustomobject]@{ Version = $ver; Path = $inst.TrimEnd('\'); Exe = $exe }
+            }
+        }
+    }
+    return $best
+}
+
+<#
+ Ermittelt Download-URL und Version des Python-Installers.
+ Ist unter "Erweiterte Optionen" eine URL eingetragen, wird sie verwendet;
+ sonst wird die Startseite von python.org/downloads gelesen, deren
+ Download-Knopf immer auf den aktuellen Windows-x64-Installer zeigt:
+   https://www.python.org/ftp/python/3.13.7/python-3.13.7-amd64.exe
+#>
+function Get-PythonDownloadInfo {
+    $own = ([string]$script:Cfg.PyUrl).Trim()
+    if ($own) {
+        $ver = $null
+        if ($own -match 'python-(\d+\.\d+\.\d+)') { $ver = [version]$Matches[1] }
+        return [pscustomobject]@{ Url = $own; Version = $ver }
+    }
+    $res = Invoke-LongRunning -Activity 'Aktuelle Python-Version wird ermittelt' -ArgumentList @('https://www.python.org/downloads/') -ScriptBlock {
+        param($u)
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference    = 'SilentlyContinue'
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+        $html = (Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 30).Content
+        $m = [regex]::Match($html, 'https://www\.python\.org/ftp/python/(\d+\.\d+\.\d+)/python-\1-amd64\.exe')
+        if (-not $m.Success) { throw 'Auf python.org/downloads wurde kein Windows-x64-Installer gefunden.' }
+        @{ Url = $m.Value; Version = $m.Groups[1].Value }
+    }
+    return [pscustomobject]@{ Url = [string]$res.Url; Version = [version]$res.Version }
+}
+
+<#
+ Installiert Python systemweit. Der offizielle Installer übernimmt mit
+ PrependPath=1 auch den PATH-Eintrag (Programmordner und Scripts-Ordner für
+ pip); zur Sicherheit wird der Eintrag danach kontrolliert und notfalls über
+ Add-ToMachinePath nachgezogen. Include_test=0 spart die Testsuite.
+#>
+function Invoke-InstallPython {
+    Write-Log 'Python (optional)' 'Step'
+
+    $info = Get-PythonDownloadInfo
+    Write-Log "Quelle: $($info.Url)"
+
+    $have = Get-PythonInstallInfo
+    if ($have -and $info.Version -and $have.Version -ge $info.Version) {
+        Write-Log "Python $($have.Version) ist bereits installiert ($($have.Path)) - Installation wird übersprungen." 'Ok'
+    } else {
+        if ($have) { Write-Log "Vorhandene Python-Version $($have.Version) wird auf $($info.Version) aktualisiert." 'Info' }
+        $exe = Join-Path $env:TEMP (Split-Path $info.Url -Leaf)
+        Get-FileWithUi -Url $info.Url -OutFile $exe -Activity 'Python wird geladen'
+        Write-Log ("SHA256: {0}" -f (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)
+
+        $code = Start-ProcessWithUi -FilePath $exe -Activity 'Python wird installiert' -ArgumentList @(
+            '/quiet',
+            'InstallAllUsers=1',    # systemweit nach C:\Program Files\PythonXY
+            'PrependPath=1',        # PATH-Eintrag (Maschine) durch den Installer
+            'Include_test=0'        # Testsuite weglassen
+        )
+        switch ($code) {
+            0       { Write-Log 'Python installiert.' 'Ok' }
+            3010    { Write-Log 'Python installiert. Windows meldet: Neustart erforderlich.' 'Warn'; $script:RebootNeeded = $true }
+            1602    { throw 'Die Python-Installation wurde abgebrochen.' }
+            default { throw "Python-Installer meldet Exitcode $code (Details: %TEMP%\Python*.log)." }
+        }
+    }
+
+    # Kontrolle: Installation auffindbar und PATH-Einträge vorhanden?
+    $py = Get-PythonInstallInfo
+    if (-not $py) { throw 'Python wurde installiert, ist aber in der Registry nicht auffindbar - bitte Protokoll prüfen.' }
+
+    $scripts = Join-Path $py.Path 'Scripts'
+    Add-ToMachinePath -Dirs @($py.Path, $scripts)
+
+    $v = Invoke-ExeCapture -FilePath $py.Exe -ArgumentList @('--version')
+    if ($v.ExitCode -eq 0 -and $v.Lines.Count -gt 0) {
+        Write-Log ([string]$v.Lines[0]) 'Ok'
+        $script:Result.PyVersion = ([string]$v.Lines[0]) -replace '^Python\s+', ''
+    }
+    $pip = Invoke-ExeCapture -FilePath $py.Exe -ArgumentList @('-m', 'pip', '--version')
+    if ($pip.ExitCode -eq 0 -and $pip.Lines.Count -gt 0) {
+        Write-Log ([string]$pip.Lines[0]) 'Ok'
+    } else {
+        Write-Log 'pip antwortet nicht - bitte im Protokoll prüfen.' 'Warn'
+    }
+    $script:Result.PyOk   = ($v.ExitCode -eq 0)
+    $script:Result.PyPath = $py.Path
+}
+
 function Get-StepPlan {
     $steps = New-Object System.Collections.Generic.List[object]
     if ($script:Cfg.InstallWebStack) {
@@ -2325,6 +2463,9 @@ function Get-StepPlan {
             $steps.Add(@{ Key = 'wb';  Title = 'MySQL Workbench';                         Action = { Install-MySqlWorkbench } })
         }
     }
+    if ($script:Cfg.InstallPython) {
+        $steps.Add(@{ Key = 'py';      Title = 'Python installieren';                     Action = { Invoke-InstallPython } })
+    }
     return , $steps.ToArray()
 }
 
@@ -2332,6 +2473,7 @@ function Invoke-FullSetup {
     $script:Result = @{
         PhpVersion = $null; PhpOk = $false; HttpOk = $false; PhpModules = @()
         MySqlVersion = $null; MySqlOk = $false; CredFile = $null
+        PyVersion = $null; PyOk = $false; PyPath = $null
         Error = $null; FailedStep = $null; Success = $false
     }
     $plan = Get-StepPlan
@@ -2449,7 +2591,7 @@ function Ask-YesNo {
 # Ein Ort für alle Maße. Kopf (64) + Fußleiste (56) + Statuszeile (24) = 144,
 # dazu die Innenabstände des Inhaltsbereichs (18 oben, 10 unten).
 $script:FormW = 940
-$script:FormH = 660
+$script:FormH = 700
 $pw = $script:FormW - 48    # nutzbare Breite einer Seite
 $ph = $script:FormH - 144 - 28   # nutzbare Höhe einer Seite
 
@@ -2611,10 +2753,15 @@ $script:LblAppHint = New-Label $card2 56 162 ($pw - 80) 20 'Kleinbuchstaben, Zif
 $script:LblMyStatus = New-Label $card2 34 184 ($pw - 60) 22 '' $script:ColWarn
 $script:LblMyStatus.Anchor = 'Top,Left,Right'
 
-$script:LblAdvHint = New-Label $script:PnlSelect 0 438 $pw 36 ('Pfade, Limits, PHP-Extensions, Netzwerkfreigabe und weitere Einstellungen finden Sie unter ' +
-    '"Erweiterte Optionen ..." links unten. Für den Normalfall sind dort keine Änderungen nötig.') $script:ColGray
+# --- Karte 3: Python (optional) ------------------------------------------------
+$card3 = New-Card $script:PnlSelect 0 436 $pw 54
+$script:ChkPy = New-Ctl System.Windows.Forms.CheckBox $card3 16 8 620 22 'Python installieren (optional)'
+$script:ChkPy.Font = $fontBig
+New-Label $card3 36 30 ($pw - 60) 18 'Neueste Version 3.x von python.org, systemweit, inklusive pip und PATH-Eintrag - nur nötig, wenn zusätzlich Python-Skripte laufen sollen.' $script:ColGray | Out-Null
+
+$script:LblAdvHint = New-Label $script:PnlSelect 0 498 $pw 16 'Pfade, Limits, PHP-Extensions, Netzwerkfreigabe und mehr: "Erweiterte Optionen ..." links unten - für den Normalfall nicht nötig.' $script:ColGray
 $script:LblAdvHint.Anchor = 'Top,Left,Right'
-$script:LblAdvState = New-Label $script:PnlSelect 0 ($ph - 20) $pw 20 '' $script:ColAccent
+$script:LblAdvState = New-Label $script:PnlSelect 0 ($ph - 18) $pw 18 '' $script:ColAccent
 $script:LblAdvState.Anchor = 'Left,Right,Bottom'
 
 # ---------- Seite 3: Installation ---------------------------------------------
@@ -2921,6 +3068,7 @@ function Load-SelectPage {
     $script:ChkWeb.Checked   = [bool]$script:Cfg.InstallWebStack
     $script:ChkMy.Checked    = [bool]$script:Cfg.InstallMySql
     $script:ChkWb.Checked    = [bool]$script:Cfg.InstallWorkbench
+    $script:ChkPy.Checked    = [bool]$script:Cfg.InstallPython
     $script:ChkAppDb.Checked = [bool]$script:Cfg.AppDbEnabled
     $script:TxtAppDb.Text    = [string]$script:Cfg.AppDbName
     $script:TxtAppUser.Text  = [string]$script:Cfg.AppDbUser
@@ -2950,7 +3098,7 @@ function Load-SelectPage {
     $diff = @()
     foreach ($k in @('InstallIis', 'InstallVcRedist', 'InstallPhp', 'AddPath', 'InstallRewrite', 'RewriteLang', 'MaxExec', 'MemLimit', 'PostMax',
                      'UploadMax', 'MaxFiles', 'SessionDir', 'UploadDir', 'Timezone', 'Curl', 'IisTuning', 'ContentLength', 'Opcache',
-                     'MyUrl', 'WbUrl', 'MyInstallDir', 'MyDataDir', 'MyService', 'MyPort', 'MyBufferPool', 'MyNetMode')) {
+                     'MyUrl', 'WbUrl', 'MyInstallDir', 'MyDataDir', 'MyService', 'MyPort', 'MyBufferPool', 'MyNetMode', 'PyUrl')) {
         if ([string]$def[$k] -ne [string]$script:Cfg[$k]) { $diff += $k }
     }
     foreach ($k in $def.Extensions.Keys) { if ([bool]$def.Extensions[$k] -ne [bool]$script:Cfg.Extensions[$k]) { $diff += 'Extensions'; break } }
@@ -2978,6 +3126,7 @@ function Save-SelectPage {
     $script:Cfg.InstallWebStack  = $script:ChkWeb.Checked
     $script:Cfg.InstallMySql     = $script:ChkMy.Checked
     $script:Cfg.InstallWorkbench = $script:ChkWb.Checked
+    $script:Cfg.InstallPython    = $script:ChkPy.Checked
     $script:Cfg.AppDbEnabled     = $script:ChkAppDb.Checked
     $script:Cfg.AppDbName        = $script:TxtAppDb.Text.Trim()
     $script:Cfg.AppDbUser        = $script:TxtAppUser.Text.Trim()
@@ -2986,7 +3135,7 @@ function Save-SelectPage {
         $script:Cfg.PhpUrl = $script:CboPhpItems[$script:CboPhp.SelectedIndex].Url
     }
 
-    if (-not $script:Cfg.InstallWebStack -and -not $script:Cfg.InstallMySql) {
+    if (-not $script:Cfg.InstallWebStack -and -not $script:Cfg.InstallMySql -and -not $script:Cfg.InstallPython) {
         return 'Bitte mindestens eine Komponente auswählen.'
     }
     if ($script:Cfg.InstallWebStack -and $script:Cfg.InstallPhp -and [string]::IsNullOrWhiteSpace([string]$script:Cfg.PhpUrl)) {
@@ -3099,6 +3248,16 @@ function Build-FinishPage {
         }
     }
 
+    if ($script:Cfg.InstallPython) {
+        Add-RtfText $rtb "Python`r`n" -Bold -Size 11 -Color $script:ColDark
+        if ($r.PyOk) {
+            Add-RtfText $rtb "  Python $($r.PyVersion) ist systemweit installiert unter $($r.PyPath)`r`n" -Color $script:ColOk
+            Add-RtfText $rtb "  python und pip sind über den PATH aufrufbar - neue Konsolenfenster kennen die Befehle sofort.`r`n`r`n"
+        } else {
+            Add-RtfText $rtb "  Python wurde nicht vollständig eingerichtet - Details im Protokoll.`r`n`r`n" -Color $script:ColWarn
+        }
+    }
+
     if ($r.Error) {
         Add-RtfText $rtb "Fehler`r`n" -Bold -Size 11 -Color $script:ColErr
         Add-RtfText $rtb "  Schritt '$($r.FailedStep)': $($r.Error)`r`n`r`n" -Color $script:ColErr
@@ -3190,6 +3349,18 @@ function Show-AdvancedDialog {
     $txtUrl.Font = $fontMono
     New-Label $grpVer 110 92 724 36 ('Frei editierbar - hier kann auch eine eigene URL eingetragen werden (z. B. interner Spiegel). ' +
         'Nur Non-Thread-Safe-Builds (nts, x64) verwenden.') $script:ColGray | Out-Null
+
+    $grpPy = New-Object System.Windows.Forms.GroupBox
+    $grpPy.Text = ' Python (optional) '
+    $grpPy.Location = New-Object System.Drawing.Point(16, 362)
+    $grpPy.Size = New-Object System.Drawing.Size(850, 128)
+    $tabInst.Controls.Add($grpPy)
+    $chkAdvPy = New-Ctl System.Windows.Forms.CheckBox $grpPy 16 26 700 22 'Python installieren (systemweit, inklusive pip und PATH-Eintrag)'
+    New-Label $grpPy 16 58 90 20 'Download:' | Out-Null
+    $txtPyUrl = New-Ctl System.Windows.Forms.TextBox $grpPy 110 55 724 24
+    $txtPyUrl.Font = $fontMono
+    New-Label $grpPy 110 84 724 36 ('Leer lassen = die neueste Version wird beim Start der Installation automatisch von python.org ermittelt. ' +
+        'Alternativ hier einen Windows-x64-Installer eintragen (python-3.x.y-amd64.exe, auch interner Spiegel).') $script:ColGray | Out-Null
 
     $fillVer = {
         $cboVer.Items.Clear()
@@ -3413,6 +3584,8 @@ function Show-AdvancedDialog {
         $cboRwLang.SelectedItem = [string]$C.RewriteLang
         if ($cboRwLang.SelectedIndex -lt 0) { $cboRwLang.SelectedIndex = 0 }
         $txtUrl.Text = [string]$C.PhpUrl
+        $chkAdvPy.Checked = [bool]$C.InstallPython
+        $txtPyUrl.Text    = [string]$C.PyUrl
         & $fillVer
         $numMaxExec.Value = [math]::Max($numMaxExec.Minimum, [math]::Min($numMaxExec.Maximum, [int]$C.MaxExec))
         $txtMem.Text = [string]$C.MemLimit; $txtPost.Text = [string]$C.PostMax; $txtUpload.Text = [string]$C.UploadMax
@@ -3440,6 +3613,8 @@ function Show-AdvancedDialog {
         $new.AddPath = $chkPath.Checked;   $new.InstallRewrite = $chkRewrite.Checked
         $new.RewriteLang = [string]$cboRwLang.SelectedItem
         $new.PhpUrl = $txtUrl.Text.Trim()
+        $new.InstallPython = $chkAdvPy.Checked
+        $new.PyUrl = $txtPyUrl.Text.Trim()
         $new.MaxExec = [int]$numMaxExec.Value; $new.MemLimit = $txtMem.Text.Trim(); $new.PostMax = $txtPost.Text.Trim()
         $new.UploadMax = $txtUpload.Text.Trim(); $new.MaxFiles = [int]$numMaxFiles.Value
         $new.SessionDir = $txtSess.Text.Trim(); $new.UploadDir = $txtUpDir.Text.Trim(); $new.Timezone = $cboTz.Text.Trim()
@@ -3676,6 +3851,11 @@ function Start-Installation {
         $lines += "  - MySQL Server 8.4 (Dienst '$($script:Cfg.MyService)', Port $($script:Cfg.MyPort))"
         if ($script:Cfg.AppDbEnabled)     { $lines += "  - Datenbank '$($script:Cfg.AppDbName)' mit Benutzer '$($script:Cfg.AppDbUser)'" }
         if ($script:Cfg.InstallWorkbench) { $lines += '  - MySQL Workbench' }
+    }
+    if ($script:Cfg.InstallPython) {
+        $pyText = if (([string]$script:Cfg.PyUrl).Trim()) { (Split-Path ([string]$script:Cfg.PyUrl).Trim() -Leaf) }
+                  else { 'neueste Version wird von python.org ermittelt' }
+        $lines += "  - Python ($pyText), inklusive pip und PATH-Eintrag"
     }
     $lines += ''
     $lines += 'Die Installation dauert je nach Server und Internetverbindung etwa 5 bis 20 Minuten.'
